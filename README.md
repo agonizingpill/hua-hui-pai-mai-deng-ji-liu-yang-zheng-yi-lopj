@@ -17,11 +17,22 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 |角色|邮箱 / 统一口令 Flowers2026!|允许动作|
 |---|---|---|
-|operator 验级员|operator@chenlu.demo|登记到场/留样、估级、封存瓶插终点、占筐挂场、记录买方报价、申请争议|
-|supervisor 拍卖主管|supervisor@chenlu.demo|全部日常动作；筐贴备注核对、核级、场次/时钟、截标/撤场、留样复判、生成结算与登记补退回单|
+|operator 验级员|operator@chenlu.demo|登记到场/留样、估级、封存瓶插终点、夜间冷位试算与建预案、记录出库、占筐挂场、记录买方报价、申请争议|
+|supervisor 拍卖主管|supervisor@chenlu.demo|全部日常动作；筐贴备注核对、核级、场次/时钟、截标/撤场、登记冷库总位与确认冷位预案、留样复判、生成结算与登记补退回单|
 |viewer 观察席|viewer@chenlu.demo|六页、档案与审计读取；全部写接口后端403|
 
 JWT8小时，PBKDF2盐化口令；Trace中间件请求ID、Burst每IP每分钟360请求、审计actor/action。演示部署需更换默认JWT和库口令。
+
+## 夜间冷位预案
+
+到场页新增“夜间冷位”区：主管先登记冷库总位（`cold_room`），验级员填预计出库时刻即可试算。系统取每批最新已核定留样，用同一采后小时分别估算两种瓶插寿命——**常温**（到场后不再续冷，冷藏小时停在留样登记值）与**续冷**（从到场一直留库到出库，冷藏小时增加在场时长），都按等级阈值换算出预计等级。只有“常温会掉级、续冷能保级”的筐才需要分冷位，同一批可拆筐。
+
+- 试算不写库；`POST /cold-plans` 建 `draft` 预案：不占冷位、不占筐，可重复试算比较。
+- `POST /cold-plans/{id}/confirm` 由主管签署：锁定冷位（总位内计算，含其他已确认预案）并锁定该批筐数（与挂场/成交共同计入实收额度）；冷位或筐任一不足则**整单 409 退回**，不写入任何占用，需重新试算。
+- 确认接口幂等：中断后重试返回同一预案，不会重复占位；并发双击或多端同时确认时以冷库总位行锁串行，只有一笔生效。
+- 与挂场/另一单并发抢占时，确认先锁父行 Consignment（按 ID 升序）、再锁冷库总位行，与挂场锁序一致，避免死锁；余量不足整单失败。
+- `POST /cold-plans/{id}/outbound` 记录出库：预案转 `outbound`，冷位与筐立即放开，可再次用于挂场或新预案。
+- 到场页可试算（两种寿命、预计等级、可保级筐数与分位建议）、建预案、确认与出库，并查看每批“挂场/成交N筐 · 冷位确认N筐 · 可挂N筐”。
 
 ## 六个业务模块
 
@@ -50,11 +61,12 @@ JWT8小时，PBKDF2盐化口令；Trace中间件请求ID、Burst每IP每分钟36
 6. 09:20 买方申请争议，无实际留样终点先被拒。回瓶插页封存6天，再开争议；主管据冻结留样复判C，Deal推进R2。
 7. 09:40 R2目标30000货款−1500佣金=28500分；此前已付38000，补退delta为−9500分，登记`REFUND-9500`退款回单。R1保持原值。
 8. 10:00 观察席复看成交、留样快照与两次回单；没有外发支付或交易指令，付款/退款是本地业务登记。
+9. 夜间冷位：主管登记冷库总位12，验级员按出库2026-11-19 06:00试算；`FL032`（常温9.83天B、续冷11.31天A，核定A）9筐与 `FL033`（常温6.81天C、续冷8.30天B，核定B）12筐可保级，冷位不足时按等级与掉级幅度优先分位。建预案不占位；主管确认后锁冷位与该批筐，此时再挂场只能用剩余筐；记录出库后冷位与筐放开。
 
 ## 结构与开发
 
-后端关系实体`models.py`、输入约束`schemas.py`、`auction_service.py`父锁/额度/竞价/成交、`dispute_service.py`证据/修订/金额账、`grading.py`模型、`worker.py`队列、`main.py`逐路由权限。前端六独立pages分别处理arrival/samples/offers/bidding/disputes/settlement，`components/tickets.js`留样等级签/到场签/拍价带等跨页复用；`utils/format.js`类型转义、`utils/actions.js`请求错误恢复、store关联档案。前后端constants均有角色、等级、留样状态、标的状态，后端schema/业务规则执行校验，前端展示实际持久状态。
+后端关系实体`models.py`、输入约束`schemas.py`、`auction_service.py`父锁/额度/竞价/成交、`cold_service.py`夜间冷位试算/分位/确认/出库、`dispute_service.py`证据/修订/金额账、`grading.py`模型与两种寿命估算、`worker.py`队列、`main.py`逐路由权限。前端六独立pages分别处理arrival/samples/offers/bidding/disputes/settlement，`components/tickets.js`留样等级签/到场签/拍价带等跨页复用；`utils/format.js`类型转义、`utils/actions.js`请求错误恢复、store关联档案。前后端constants均有角色、等级、留样状态、标的状态，后端schema/业务规则执行校验，前端展示实际持久状态。
 
 本地后端安装requirements，配置DATABASE_URL/REDIS_URL/JWT_SECRET，运行`uvicorn src.main:app --reload`与`python -m src.worker`；前端可由Compose Nginx反代/api。seed自然键只补缺：不覆盖人工筐贴、时钟、观察、竞价、争议判定和已付回单。测试与截图在`../../test-artifacts/gb-1035/`。
 
-已知范围：按筐计量，未建单支花追踪/实物退货物流；不接支付网关/买方信用或电子签章；业务时钟人工推进；瓶插终点一次封存后纠错须人工运维，不提供覆盖式修订；合成ML不证明实际寿命；单站父锁会串行化同批交易，适合本题规模。
+已知范围：按筐计量，未建单支花追踪/实物退货物流；不接支付网关/买方信用或电子签章；业务时钟人工推进；瓶插终点一次封存后纠错须人工运维，不提供覆盖式修订；合成ML不证明实际寿命，冷位两种寿命同为此模型估算、只辅助验级员与主管判断；冷位按筐数计（一筐一位），未建模库内温区、叠放与真实冷量；单站父锁会串行化同批交易，适合本题规模。

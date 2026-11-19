@@ -26,3 +26,7 @@ class BidInput(BaseModel):buyer:str=Field(min_length=2,max_length=80);unit_cents
 class DisputeInput(BaseModel):deal_id:int;reason:str=Field(min_length=6,max_length=250)
 class DecisionInput(BaseModel):grade:Literal['A','B','C'];note:str=Field(min_length=6,max_length=250)
 class ReceiptInput(BaseModel):receipt:str=Field(min_length=4,max_length=80)
+class ColdCapacityInput(BaseModel):total_slots:int=Field(ge=0,le=100000)
+class ColdLineInput(BaseModel):consignment_id:int;crates:int=Field(ge=1,le=10000)
+class ColdPlanInput(BaseModel):
+    outbound_at:datetime;cold_total:int|None=Field(default=None,ge=0,le=100000);code:str|None=Field(default=None,min_length=3,max_length=60);note:str=Field(default='',max_length=250);lines:list[ColdLineInput]=Field(default_factory=list)

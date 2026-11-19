@@ -1,1 +1,1 @@
-import{api}from'./api.js';export const state={user:null,data:null};export async function refresh(){state.data=await api('/archive')}
+import{api}from'./api.js';export const state={user:null,data:null,cold:null};export async function refresh(){const[data,cold,plans]=await Promise.all([api('/archive'),api('/cold-room'),api('/cold-plans')]);data.cold_plans=plans;state.data=data;state.cold=cold}

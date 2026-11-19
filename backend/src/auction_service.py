@@ -2,18 +2,19 @@ from sqlalchemy import select,func
 from fastapi import HTTPException
 from .models import Consignment,VaseSample,AuctionSession,AuctionLot,Bid,Deal,Clock
 from .common import lock,pack,add,audit,stamp
+from . import cold_service as cold
 FLOORS={'A':8000,'B':5500,'C':3000}
 def session_create(s,d,u):
     clock=lock(s,Clock,1)
     if stamp(d.closes_at)<=clock.now:raise HTTPException(409,'场次必须晚于业务时钟结束')
     x=AuctionSession(code=d.code,opens_at=stamp(d.opens_at),closes_at=stamp(d.closes_at));audit(s,u,'建立拍卖场次 '+d.code);return add(s,x)
 def offer(s,d,u):
-    cons=lock(s,Consignment,d.consignment_id);session=lock(s,AuctionSession,d.session_id);clock=lock(s,Clock,1);sample=lock(s,VaseSample,d.sample_id)
+    cons=lock(s,Consignment,d.consignment_id);cold.room(s,for_update=True);session=lock(s,AuctionSession,d.session_id);clock=lock(s,Clock,1);sample=lock(s,VaseSample,d.sample_id)
     if sample.consignment_id!=cons.id or sample.state!='approved':raise HTTPException(409,'挂场须使用本到场批次已主管核定的留样等级')
     if session.closes_at<=clock.now:raise HTTPException(409,'场次已截止')
     if d.reserve_cents<FLOORS[sample.approved_grade]:raise HTTPException(409,'底价低于该等级最低筐价 '+str(FLOORS[sample.approved_grade]/100)+'元')
-    occupied=s.scalar(select(func.coalesce(func.sum(AuctionLot.crates),0)).where(AuctionLot.consignment_id==cons.id,AuctionLot.state!='cancelled'))
-    if occupied+d.crates>cons.crates:raise HTTPException(409,'到场筐数不足，已挂/已成交筐不可重复占用')
+    occupied=s.scalar(select(func.coalesce(func.sum(AuctionLot.crates),0)).where(AuctionLot.consignment_id==cons.id,AuctionLot.state!='cancelled'))+cold.confirmed_crates_for(s,cons.id)
+    if occupied+d.crates>cons.crates:raise HTTPException(409,'到场筐数不足：已挂/已成交筐与已确认冷位预案共同占用，不可重复使用')
     x=AuctionLot(**d.model_dump(),grade_snapshot=sample.approved_grade);audit(s,u,'按等级挂场锁筐 '+d.code);return add(s,x)
 def locked_lot(s,id):
     pre=s.get(AuctionLot,id)

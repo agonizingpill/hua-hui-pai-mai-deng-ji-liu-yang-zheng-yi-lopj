@@ -1,5 +1,6 @@
 import os,logging
 from contextlib import asynccontextmanager
+from datetime import datetime
 import redis
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -12,6 +13,7 @@ from .common import lock,pack,add,audit,stamp
 from .auth import current,writer,supervisor,verify,token
 from .middleware import Trace,Burst
 from . import auction_service as auction,dispute_service as dispute
+from . import cold_service as cold
 q=redis.Redis.from_url(os.environ['REDIS_URL'],decode_responses=True)
 @asynccontextmanager
 async def lifespan(app):
@@ -35,7 +37,7 @@ def login(d:Login,s=Depends(session)):
 def me(u=Depends(current)):return {'email':u.email,'role':u.role}
 @app.get('/archive')
 def archive(s=Depends(session),u=Depends(current)):
-    return {m.__tablename__:[pack(x)for x in s.scalars(select(m).order_by(m.id))]for m in (Clock,Consignment,VaseSample,AuctionSession,AuctionLot,Bid,Deal,Dispute,Settlement)}
+    return {m.__tablename__:[pack(x)for x in s.scalars(select(m).order_by(m.id))]for m in (Clock,Consignment,VaseSample,AuctionSession,AuctionLot,Bid,Deal,Dispute,Settlement,ColdRoom,ColdPlan,ColdPlanLine)}
 @app.get('/audits')
 def audits(s=Depends(session),u=Depends(current)):return [pack(x)for x in s.scalars(select(Audit).order_by(Audit.id.desc()).limit(50))]
 @app.post('/consignments')
@@ -102,3 +104,22 @@ def settlement(id:int,s=Depends(session),u=Depends(supervisor)):
 @app.post('/settlements/{id}/pay')
 def pay(id:int,d:ReceiptInput,s=Depends(session),u=Depends(supervisor)):
     x=dispute.pay(s,id,d,u);s.commit();return x
+@app.get('/cold-room')
+def cold_room(s=Depends(session),u=Depends(current)):return cold.capacity(s)
+@app.put('/cold-room')
+def cold_room_set(d:ColdCapacityInput,s=Depends(session),u=Depends(supervisor)):
+    x=cold.set_capacity(s,d,u);s.commit();return x
+@app.get('/cold-plans/preview')
+def cold_preview(outbound_at:datetime,cold_total:int|None=None,s=Depends(session),u=Depends(current)):
+    return cold.preview(s,outbound_at,cold_total if cold_total is not None else cold.capacity(s)['total_slots'])
+@app.get('/cold-plans')
+def cold_plans(s=Depends(session),u=Depends(current)):return cold.list_plans(s)
+@app.post('/cold-plans')
+def cold_plan_new(d:ColdPlanInput,s=Depends(session),u=Depends(writer)):
+    x=cold.create(s,d,u);s.commit();return x
+@app.post('/cold-plans/{id}/confirm')
+def cold_plan_confirm(id:int,s=Depends(session),u=Depends(supervisor)):
+    x=cold.confirm(s,id,u);s.commit();return x
+@app.post('/cold-plans/{id}/outbound')
+def cold_plan_outbound(id:int,s=Depends(session),u=Depends(writer)):
+    x=cold.outbound(s,id,u);s.commit();return x
